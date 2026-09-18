@@ -1,0 +1,40 @@
+name: Daily Hyundai News Digest
+
+on:
+  schedule:
+    # 매일 UTC 00:00 = 한국시간(KST) 09:00
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}   # Actions 탭에서 수동 실행 버튼도 사용 가능
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fetch & summarize script
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/fetch_and_summarize.py
+
+      - name: Commit and push updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "chore: daily news update $(date -u +'%Y-%m-%d')"
+          git push
