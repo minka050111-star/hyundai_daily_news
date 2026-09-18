@@ -348,4 +348,8 @@ def main():
     if today_str not in index:
         index.append(today_str)
     index = sorted(set(index), reverse=True)
-    save_json(INDEX_PATH,
+    save_json(INDEX_PATH, index)
+
+
+if __name__ == "__main__":
+    main()
