@@ -78,7 +78,68 @@
     color: var(--muted);
   }
 
+  .tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0 0 22px;
+  }
+  .tab-btn {
+    font: inherit;
+    font-size: 0.86rem;
+    padding: 7px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .tab-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .tab-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .cat-tag {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+    margin-top: 1px;
+  }
+  .cat-hyundai { background: var(--accent-soft); color: var(--accent); }
+  .cat-industry { background: #e9f5ea; color: #2f7d3a; }
+  .cat-geo { background: #fbeee0; color: #a85b12; }
+  @media (prefers-color-scheme: dark) {
+    .cat-industry { background: #1c3320; color: #7fd28c; }
+    .cat-geo { background: #3a2a17; color: #f0ad5f; }
+  }
+
   .status { color: var(--muted); font-size: 0.9rem; padding: 24px 4px; }
+
+  .summary-box {
+    margin-top: 22px;
+    padding: 18px 20px;
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+  }
+  .summary-box .summary-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .summary-box p {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: var(--text);
+  }
 
   .card {
     background: var(--surface);
@@ -146,19 +207,36 @@
     <span class="count-pill" id="count-pill"></span>
   </div>
 
+  <div class="tabs" id="tabs"></div>
+
   <div id="content">
     <div class="status">불러오는 중...</div>
   </div>
+
+  <div id="cat-summary"></div>
 
   <footer>매일 오전 9시(KST) GitHub Actions로 자동 갱신 · 데이터는 Naver 뉴스 검색 API 기반</footer>
 </div>
 
 <script>
 (function () {
+  const CATEGORIES = ["전체", "현대자동차", "자동차 산업", "국제 정세"];
+  const CAT_CLASS = {
+    "현대자동차": "cat-hyundai",
+    "자동차 산업": "cat-industry",
+    "국제 정세": "cat-geo",
+  };
+
   const dateSelect = document.getElementById("date-select");
   const content = document.getElementById("content");
   const countPill = document.getElementById("count-pill");
   const latestBtn = document.getElementById("latest-btn");
+  const tabsEl = document.getElementById("tabs");
+  const catSummaryEl = document.getElementById("cat-summary");
+
+  let currentItems = [];
+  let currentSummaries = {};
+  let currentCategory = "전체";
 
   function fmtDate(iso) {
     try {
@@ -185,17 +263,60 @@
     }[c]));
   }
 
-  function renderDay(day) {
-    if (!day || !day.items || !day.items.length) {
-      content.innerHTML = '<div class="status">이 날짜에는 저장된 기사가 없습니다.</div>';
+  function renderSummary() {
+    const text = currentSummaries && currentSummaries[currentCategory];
+    if (!text) {
+      catSummaryEl.innerHTML = "";
+      return;
+    }
+    catSummaryEl.innerHTML = `
+      <div class="summary-box">
+        <div class="summary-head">🗂 ${escapeHtml(currentCategory)} 요약</div>
+        <p>${escapeHtml(text)}</p>
+      </div>
+    `;
+  }
+
+  function renderTabs() {
+    // 각 카테고리별 건수 계산 (전체 = 이 날짜 전체 기사 수)
+    const counts = { "전체": currentItems.length };
+    for (const cat of CATEGORIES.slice(1)) {
+      counts[cat] = currentItems.filter((it) => (it.category || "자동차 산업") === cat).length;
+    }
+    tabsEl.innerHTML = CATEGORIES.map((cat) => `
+      <button type="button" class="tab-btn${cat === currentCategory ? " active" : ""}" data-cat="${escapeHtml(cat)}">
+        ${escapeHtml(cat)} <span style="opacity:.7">${counts[cat]}</span>
+      </button>
+    `).join("");
+    tabsEl.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        currentCategory = btn.getAttribute("data-cat");
+        renderTabs();
+        renderCards();
+        renderSummary();
+      });
+    });
+  }
+
+  function renderCards() {
+    const filtered = currentCategory === "전체"
+      ? currentItems
+      : currentItems.filter((it) => (it.category || "자동차 산업") === currentCategory);
+
+    if (!filtered.length) {
+      content.innerHTML = '<div class="status">이 카테고리에는 표시할 기사가 없습니다.</div>';
       countPill.textContent = "";
       return;
     }
-    countPill.textContent = day.items.length + "건";
-    content.innerHTML = day.items.map((it, i) => `
+    countPill.textContent = filtered.length + "건";
+    content.innerHTML = filtered.map((it, i) => {
+      const cat = it.category || "자동차 산업";
+      const catClass = CAT_CLASS[cat] || "cat-industry";
+      return `
       <article class="card">
         <div class="card-head">
           <span class="idx">${String(i + 1).padStart(2, "0")}</span>
+          <span class="cat-tag ${catClass}">${escapeHtml(cat)}</span>
           <h2><a href="${escapeHtml(it.link)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a></h2>
         </div>
         <div class="pub">${escapeHtml(fmtPub(it.pubDate))}</div>
@@ -208,7 +329,24 @@
           <p>${escapeHtml(it.insight)}</p>
         </div>
       </article>
-    `).join("");
+    `;
+    }).join("");
+  }
+
+  function renderDay(day) {
+    currentItems = (day && day.items) || [];
+    currentSummaries = (day && day.category_summaries) || {};
+    currentCategory = "전체";
+    if (!currentItems.length) {
+      tabsEl.innerHTML = "";
+      content.innerHTML = '<div class="status">이 날짜에는 저장된 기사가 없습니다.</div>';
+      countPill.textContent = "";
+      catSummaryEl.innerHTML = "";
+      return;
+    }
+    renderTabs();
+    renderCards();
+    renderSummary();
   }
 
   async function loadDay(dateStr) {
