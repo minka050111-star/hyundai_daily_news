@@ -134,12 +134,13 @@
     font-weight: 700;
     color: var(--accent);
   }
-  .summary-box p {
+  .summary-box p, .summary-box .md-list {
     margin: 0;
     font-size: 0.92rem;
     line-height: 1.6;
     color: var(--text);
   }
+  .summary-box p + p, .summary-box .md-list + p, .summary-box p + .md-list { margin-top: 6px; }
 
   .card {
     background: var(--surface);
@@ -181,9 +182,28 @@
     color: var(--text-secondary);
     margin-top: 1px;
   }
-  .row p { margin: 0; font-size: 0.9rem; line-height: 1.55; color: var(--text-secondary); }
-  .row.insight p { color: var(--text); }
+  .row .md-body { flex: 1; min-width: 0; }
+  .row .md-body p, .row .md-body ul {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+  }
+  .row .md-body p + p, .row .md-body ul + p, .row .md-body p + ul { margin-top: 4px; }
+  .row.insight .md-body p, .row.insight .md-body ul { color: var(--text); }
   .row.insight .tag { background: var(--accent-soft); color: var(--accent); }
+
+  .md-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .md-list li { position: relative; padding-left: 14px; }
+  .md-list li::before {
+    content: "•";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+  }
+  strong { color: var(--text); font-weight: 700; }
+  .row.insight .md-list li::before,
+  .summary-box .md-list li::before { color: var(--accent); }
 
   footer {
     margin-top: 36px;
@@ -263,6 +283,29 @@
     }[c]));
   }
 
+  // 아주 가벼운 마크다운 렌더러: "- " 불릿과 "**볼드**"만 지원.
+  // 항상 escapeHtml을 먼저 거치므로 원본 텍스트에 실제 HTML 태그가 있어도 안전하게 무해화됨.
+  function mdToHtml(raw) {
+    const escaped = escapeHtml(raw || "");
+    const bolded = escaped.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    const lines = bolded.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return "";
+
+    let html = "";
+    let inList = false;
+    for (const line of lines) {
+      if (line.startsWith("- ")) {
+        if (!inList) { html += '<ul class="md-list">'; inList = true; }
+        html += `<li>${line.slice(2)}</li>`;
+      } else {
+        if (inList) { html += "</ul>"; inList = false; }
+        html += `<p>${line}</p>`;
+      }
+    }
+    if (inList) html += "</ul>";
+    return html;
+  }
+
   function renderSummary() {
     const text = currentSummaries && currentSummaries[currentCategory];
     if (!text) {
@@ -272,7 +315,7 @@
     catSummaryEl.innerHTML = `
       <div class="summary-box">
         <div class="summary-head">🗂 ${escapeHtml(currentCategory)} 요약</div>
-        <p>${escapeHtml(text)}</p>
+        ${mdToHtml(text)}
       </div>
     `;
   }
@@ -322,11 +365,11 @@
         <div class="pub">${escapeHtml(fmtPub(it.pubDate))}</div>
         <div class="row">
           <span class="tag">핵심내용</span>
-          <p>${escapeHtml(it.core)}</p>
+          <div class="md-body">${mdToHtml(it.core)}</div>
         </div>
         <div class="row insight">
           <span class="tag">면접 인사이트</span>
-          <p>${escapeHtml(it.insight)}</p>
+          <div class="md-body">${mdToHtml(it.insight)}</div>
         </div>
       </article>
     `;
