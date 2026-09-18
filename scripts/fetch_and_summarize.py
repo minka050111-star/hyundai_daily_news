@@ -105,9 +105,12 @@ RELEVANCE_KEYWORDS = {
 DIRECT_MENTION_KEYWORDS = ["현대차", "현대자동차", "현대차그룹", "기아"]
 DIRECT_MENTION_BONUS = 2
 
+# 2026년 네이버 뉴스 검색 API가 NAVER API HUB(NCP)로 이관되면서
+# 요청 주소와 인증 헤더 이름이 변경되었습니다.
+NAVER_NEWS_API_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 HEADERS = {
-    "X-Naver-Client-Id": NAVER_CLIENT_ID,
-    "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+    "X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID,
+    "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET,
 }
 
 TAG_RE = re.compile(r"<[^>]+>")
@@ -151,7 +154,7 @@ def search_naver_news(query: str):
         print("ERROR: NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 환경변수가 설정되지 않았습니다.", file=sys.stderr)
         sys.exit(1)
     url = (
-        "https://openapi.naver.com/v1/search/news.json"
+        f"{NAVER_NEWS_API_URL}"
         f"?query={quote(query)}&display={MAX_PER_QUERY}&sort=date"
     )
     resp = requests.get(url, headers=HEADERS, timeout=15)
