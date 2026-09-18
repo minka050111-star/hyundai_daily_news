@@ -4,8 +4,12 @@
 현대자동차 대외협력 면접 준비용 - 매일 뉴스 수집/요약 스크립트
 
 1. 네이버 뉴스 검색 API로 여러 키워드를 검색
+   - HYUNDAI_QUERIES: 현대차/현대차그룹을 직접 언급하는 검색어
+   - INDUSTRY_QUERIES: 현대차를 언급하지 않아도, 자동차 산업 전반의
+     관세/통상/정책/지정학 이슈를 다루는 검색어 (현대차 전략에 영향 줄 수 있는 배경 뉴스)
 2. 이미 사용한 기사(seen_links.json)는 영구 제외
-3. 키워드 관련도 점수 + 최신순으로 상위 10개 선별
+3. 관련도 점수(MIN_SCORE 미만 제외, 현대차/기아 직접 언급 시 보너스 점수) +
+   최신순으로 상위 10개 선별 — "현대"라는 단어가 꼭 들어가야 하는 건 아님
 4. (ANTHROPIC_API_KEY가 있으면) Claude API로 핵심내용/면접 인사이트 생성
    (없으면) 네이버가 제공하는 description을 핵심내용으로, 규칙 기반 인사이트로 대체
 5. docs/data/{YYYY-MM-DD}.json 으로 저장, docs/data/index.json / seen_links.json 갱신
@@ -46,9 +50,14 @@ INDEX_PATH = DATA_DIR / "index.json"
 TOP_N = 10
 FRESH_DAYS = 5          # 이 기간(일) 이내 기사만 신선한 것으로 취급
 MAX_PER_QUERY = 30       # 쿼리당 네이버 API에서 가져올 개수
+MIN_SCORE = 3            # 이 점수 미만이면 "현대차 관련성 낮음"으로 보고 제외
+                          # (예전엔 제목/설명에 "현대"가 꼭 들어가야 했지만,
+                          #  이제는 "현대"가 없어도 자동차 산업/통상/지정학 전반에서
+                          #  현대차 대외협력 전략에 영향 줄 만한 기사면 통과시킴)
 
-# 검색 쿼리 (JD의 "네트워크/지정학/정책/대관" 관점을 반영)
-QUERIES = [
+# 검색 쿼리 — 두 그룹으로 구성
+# 1) 현대차/현대차그룹을 직접 언급하는 쿼리 (직접 관련 뉴스)
+HYUNDAI_QUERIES = [
     "현대자동차 관세",
     "현대자동차 대미투자법",
     "현대차그룹 통상",
@@ -63,6 +72,25 @@ QUERIES = [
     "현대자동차 네트워크",
 ]
 
+# 2) 현대차를 직접 언급하지 않아도, 자동차 산업 전반의 정책/통상/지정학
+#    이슈를 다루는 쿼리 (현대차 대외협력 전략에 영향 줄 수 있는 배경 뉴스)
+INDUSTRY_QUERIES = [
+    "자동차 관세",
+    "자동차 업계 통상",
+    "자동차 산업 정책",
+    "전기차 보조금 정책",
+    "한미 FTA 자동차",
+    "자동차 공급망 리스크",
+    "희토류 수출 통제",
+    "인플레이션감축법 자동차",
+    "EU 탄소국경조정 자동차",
+    "글로벌 자동차 지정학",
+    "미국 자동차 관세 협상",
+    "반도체 수출통제 자동차",
+]
+
+QUERIES = HYUNDAI_QUERIES + INDUSTRY_QUERIES
+
 # 관련도 점수용 키워드 (가중치)
 RELEVANCE_KEYWORDS = {
     "관세": 3, "통상": 3, "대미투자": 3, "무역": 2, "FTA": 2,
@@ -70,7 +98,12 @@ RELEVANCE_KEYWORDS = {
     "공급망": 2, "희토류": 2, "로비": 3, "대관": 3, "외교": 3,
     "정상회의": 2, "네트워크": 2, "투자": 1, "수소": 1, "전기차": 1,
     "IRA": 2, "성김": 3, "성 김": 3, "GPO": 3,
+    "반도체": 1, "탄소국경": 2, "수출통제": 2, "제재": 2,
 }
+
+# 현대차/기아를 직접 언급하면 주는 보너스 점수 (필수는 아니지만 우선순위를 높여줌)
+DIRECT_MENTION_KEYWORDS = ["현대차", "현대자동차", "현대차그룹", "기아"]
+DIRECT_MENTION_BONUS = 2
 
 HEADERS = {
     "X-Naver-Client-Id": NAVER_CLIENT_ID,
@@ -132,6 +165,8 @@ def score_item(title: str, desc: str) -> int:
     for kw, weight in RELEVANCE_KEYWORDS.items():
         if kw in text:
             score += weight
+    if any(kw in text for kw in DIRECT_MENTION_KEYWORDS):
+        score += DIRECT_MENTION_BONUS
     return score
 
 
@@ -154,14 +189,16 @@ def collect_candidates(seen_links: set):
             norm = normalize_link(link)
             if not norm or norm in seen_links or norm in candidates:
                 continue
-            if "현대" not in title and "현대" not in desc:
-                continue  # 현대차 관련성 없는 결과 제외
 
             pub = parse_pubdate(it.get("pubDate", ""))
             if pub is not None and pub.date() < cutoff:
                 continue  # 너무 오래된 기사 제외
 
             score = score_item(title, desc)
+            if score < MIN_SCORE:
+                continue  # 자동차/통상/지정학 관련성이 너무 낮은 결과 제외
+                          # (현대차를 직접 언급하지 않아도 여기서 걸러지지 않으면 후보에 포함됨)
+
             candidates[norm] = {
                 "title": title,
                 "link": link,
@@ -311,8 +348,4 @@ def main():
     if today_str not in index:
         index.append(today_str)
     index = sorted(set(index), reverse=True)
-    save_json(INDEX_PATH, index)
-
-
-if __name__ == "__main__":
-    main()
+    save_json(INDEX_PATH,
