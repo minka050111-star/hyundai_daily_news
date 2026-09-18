@@ -27,9 +27,10 @@ import re
 import json
 import html
 import sys
+import difflib
 import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -58,67 +59,153 @@ MIN_SCORE = 3            # 이 점수 미만이면 "현대차 관련성 낮음"�
                           #  이제는 "현대"가 없어도 자동차 산업/통상/지정학 전반에서
                           #  현대차 대외협력 전략에 영향 줄 만한 기사면 통과시킴)
 
-# 검색 쿼리 — 두 그룹으로 구성
-# 1) 현대차/현대차그룹을 직접 언급하는 쿼리 (직접 관련 뉴스)
+# 검색 쿼리 — 세 그룹으로 구성 (아래 CATEGORIES 3개와 1:1로 매칭되는 배경 검색어)
+# 1) 현대차그룹 고유 기업·전략·신사업 관련 검색어 (경영/이벤트, 생산거점/신차,
+#    미래기술/신사업)
 HYUNDAI_QUERIES = [
-    "현대자동차 관세",
-    "현대자동차 대미투자법",
-    "현대차그룹 통상",
-    "현대자동차 지정학",
-    "현대자동차 정책",
-    "현대차그룹 대관",
-    "현대자동차 해외투자",
-    "현대차그룹 외교",
-    "현대자동차 수소 정책",
-    "현대자동차 공급망",
-    "현대차그룹 로비",
-    "현대자동차 네트워크",
+    "현대차 제네시스",
+    "현대차 호세 무뇨스",
+    "현대차 정의선",
+    "현대차 Investor Day",
+    "현대차 주주환원",
+    "현대차 밸류업",
+    "현대차 HMGMA",
+    "현대차 아이오닉",
+    "현대차 캐스퍼EV",
+    "현대차 넥쏘",
+    "현대차 EREV",
+    "현대차 TMED",
+    "현대차 마그마",
+    "현대차 Pleos",
+    "현대차 SDV",
+    "현대차 HTWO",
+    "현대차 보스턴다이내믹스",
+    "현대차 포티투닷",
+    "현대차 슈퍼널",
+    "현대차 모셔널",
 ]
 
-# 2) 현대차를 직접 언급하지 않아도, 자동차 산업 전반의 정책/통상/지정학
-#    이슈를 다루는 쿼리 (현대차 대외협력 전략에 영향 줄 수 있는 배경 뉴스)
+# 2) 현대차를 직접 언급하지 않아도, 자동차 산업 전반의 시장/기술/환경규제
+#    트렌드를 다루는 검색어 (전동화·파워트레인, 환경·연비규제, 미래 모빌리티)
 INDUSTRY_QUERIES = [
-    "자동차 관세",
-    "자동차 업계 통상",
-    "자동차 산업 정책",
-    "전기차 보조금 정책",
-    "한미 FTA 자동차",
-    "자동차 공급망 리스크",
-    "희토류 수출 통제",
-    "인플레이션감축법 자동차",
-    "EU 탄소국경조정 자동차",
-    "글로벌 자동차 지정학",
-    "미국 자동차 관세 협상",
-    "반도체 수출통제 자동차",
+    "전기차 캐즘",
+    "하이브리드차 판매",
+    "EREV 주행거리연장",
+    "LFP 배터리",
+    "NCM 배터리",
+    "배터리 화재 전기차",
+    "BaaS 배터리구독",
+    "IONNA 충전",
+    "NACS 충전표준",
+    "Euro7 배출규제",
+    "EPA 배출가스 기준",
+    "CAFE 연비규제",
+    "탄소중립 자동차",
+    "RE100 자동차",
+    "SDV 소프트웨어 자동차",
+    "자율주행 로보택시",
+    "피지컬 AI 자동차",
+    "AI 자율제조 공장",
 ]
 
-QUERIES = HYUNDAI_QUERIES + INDUSTRY_QUERIES
+# 3) 통상/지정학/글로벌 규제 — 대외협력 직무에서 가장 예의주시해야 하는 영역
+#    (통상·관세, 친환경·통상규제, 공급망·노동인권규제, 지정학·글로벌경쟁)
+GEO_QUERIES = [
+    "보편관세 자동차",
+    "보호무역주의 자동차",
+    "한미 자동차 관세",
+    "미국 신정부 통상",
+    "트럼프 자동차 관세",
+    "IRA 전기차 보조금",
+    "CBAM 탄소국경조정",
+    "EUDR 산림전용방지",
+    "EU 배터리법",
+    "IAA 유럽 산업가속화법",
+    "UFLPA 강제노동",
+    "CSDDD 공급망실사",
+    "책임광물 리튬 니켈",
+    "미중 갈등 자동차",
+    "중국 전기차 해외진출",
+    "러시아 우크라이나 전쟁 자동차",
+    "중동 지정학 리스크",
+    "공급망 다변화 자동차",
+]
 
-# 관련도 점수용 키워드 (가중치)
+QUERIES = HYUNDAI_QUERIES + INDUSTRY_QUERIES + GEO_QUERIES
+
+# 관련도 점수용 키워드 (가중치) — 카테고리 대표성이 강할수록 높은 가중치
 RELEVANCE_KEYWORDS = {
-    "관세": 3, "통상": 3, "대미투자": 3, "무역": 2, "FTA": 2,
-    "정책": 2, "규제": 2, "보조금": 2, "지정학": 3, "안보": 3,
-    "공급망": 2, "희토류": 2, "로비": 3, "대관": 3, "외교": 3,
-    "정상회의": 2, "네트워크": 2, "투자": 1, "수소": 1, "전기차": 1,
-    "IRA": 2, "성김": 3, "성 김": 3, "GPO": 3,
-    "반도체": 1, "탄소국경": 2, "수출통제": 2, "제재": 2,
+    # --- 현대자동차: 경영 & 주요 이벤트 ---
+    "제네시스": 3, "호세 무뇨스": 3, "정의선": 3, "Investor Day": 2,
+    "주주서한": 2, "주주환원": 2, "밸류업": 2,
+    # --- 현대자동차: 생산거점 & 신차/파워트레인 ---
+    "HMGMA": 3, "메타플랜트": 3, "아이오닉": 2, "IONIQ": 2, "캐스퍼": 1,
+    "넥쏘": 3, "EREV": 2, "TMED": 2, "마그마": 2, "LCV": 1, "ST1": 2,
+    # --- 현대자동차: 미래기술 & 그룹 신사업 ---
+    "Pleos": 3, "플레오스": 3, "SDV": 2, "HTWO": 3, "보스턴다이내믹스": 3,
+    "보스턴 다이내믹스": 3, "아틀라스": 1, "포티투닷": 3, "슈퍼널": 3,
+    "모셔널": 3, "웨이모": 1,
+    # --- 자동차 산업: 전동화 & 파워트레인 트렌드 ---
+    "전기차 캐즘": 3, "캐즘": 2, "하이브리드": 2, "HEV": 1, "LFP": 2,
+    "NCM": 2, "배터리 화재": 2, "BaaS": 2, "IONNA": 2, "NACS": 2,
+    # --- 자동차 산업: 환경 & 연비 규제 ---
+    "Euro7": 2, "유로7": 2, "EPA": 2, "플릿": 1, "CAFE": 2, "탄소중립": 2,
+    "RE100": 2, "LCA": 1,
+    # --- 자동차 산업: 미래 모빌리티 & 기술 ---
+    "E/E 아키텍처": 2, "OTA": 1, "자율주행": 1, "로보택시": 2,
+    "피지컬 AI": 2, "SDF": 2,
+    # --- 국제정세: 통상 & 관세 리스크 ---
+    "보편관세": 3, "보호무역": 2, "한미 무역": 2, "한미 관세": 3,
+    "트럼프 관세": 3, "자동차 관세": 3, "관세": 2, "통상": 2, "무역": 1,
+    # --- 국제정세: 친환경 & 통상 규제 ---
+    "IRA": 2, "CBAM": 3, "EUDR": 2, "EU Battery Regulation": 2,
+    "배터리법": 2, "IAA": 2,
+    # --- 국제정세: 공급망 & 노동/인권 규제 ---
+    "UFLPA": 3, "CSDDD": 3, "FLR": 2, "책임광물": 2, "리튬": 1, "니켈": 1,
+    "코발트": 1, "흑연": 1, "공급망 재편": 2, "공급망": 2,
+    # --- 국제정세: 지정학 & 글로벌 경쟁 ---
+    "미중 갈등": 3, "NEV": 2, "중국 전기차": 2, "러우 전쟁": 2,
+    "우크라이나": 1, "중동": 1, "지정학": 3, "공급망 다변화": 2,
+    # --- 기존 대외협력 맥락 키워드 (계속 유지) ---
+    "대미투자": 2, "FTA": 2, "정책": 2, "규제": 1, "보조금": 1, "안보": 2,
+    "희토류": 2, "로비": 3, "대관": 3, "외교": 3, "정상회의": 2,
+    "네트워크": 1, "투자": 1, "수소": 1, "전기차": 1, "성김": 3, "성 김": 3,
+    "GPO": 3, "반도체": 1, "탄소국경": 2, "수출통제": 2, "제재": 2,
 }
 
-# 현대차/기아를 직접 언급하면 주는 보너스 점수 (필수는 아니지만 우선순위를 높여줌)
-DIRECT_MENTION_KEYWORDS = ["현대차", "현대자동차", "현대차그룹", "기아"]
+# 현대차그룹 고유 기업/브랜드/인물이 언급되면 무조건 "현대자동차" 카테고리로 분류
+DIRECT_MENTION_KEYWORDS = [
+    "현대차", "현대자동차", "현대차그룹", "기아", "제네시스",
+    "호세 무뇨스", "정의선", "HMGMA", "아이오닉", "IONIQ", "캐스퍼EV",
+    "넥쏘", "마그마", "Pleos", "플레오스", "HTWO", "포티투닷", "슈퍼널",
+    "모셔널", "보스턴다이내믹스", "보스턴 다이내믹스", "ST1",
+]
 DIRECT_MENTION_BONUS = 2
 
 # 대시보드 카테고리 분류용 키워드
-# 1) 제목/설명에 현대차/기아가 직접 언급되면 무조건 "현대자동차"
-# 2) 그렇지 않으면 관세/통상/외교/안보 등 "국제 정세" 성격 키워드와
-#    정책/보조금/기술 등 "자동차 산업" 성격 키워드의 매칭 개수를 비교해 분류
+# 1) 위 DIRECT_MENTION_KEYWORDS(현대차그룹 고유 기업/브랜드/인물)가 언급되면
+#    무조건 "현대자동차"
+# 2) 그렇지 않으면 "국제 정세"(통상/관세/지정학/글로벌 규제) 성격 키워드와
+#    "자동차 산업"(시장/기술/환경규제) 성격 키워드의 매칭 개수를 비교해 분류
 CATEGORIES = ["현대자동차", "자동차 산업", "국제 정세"]
+
 GEO_KEYWORDS = [
-    "관세", "통상", "협상", "대미투자", "무역", "FTA", "지정학", "안보",
-    "희토류", "공급망", "로비", "대관", "외교", "정상회의", "네트워크",
-    "IRA", "성김", "성 김", "GPO", "탄소국경", "수출통제", "제재",
+    "보편관세", "보호무역", "한미 무역", "한미 관세", "트럼프 관세",
+    "자동차 관세", "관세", "통상", "무역", "IRA", "CBAM", "EUDR",
+    "EU Battery Regulation", "배터리법", "IAA", "UFLPA", "CSDDD", "FLR",
+    "책임광물", "리튬", "니켈", "코발트", "흑연", "공급망 재편", "공급망",
+    "미중 갈등", "NEV", "중국 전기차", "러우 전쟁", "우크라이나", "중동",
+    "지정학", "공급망 다변화", "대미투자", "FTA", "안보", "희토류", "로비",
+    "대관", "외교", "정상회의", "네트워크", "성김", "성 김", "GPO",
+    "탄소국경", "수출통제", "제재", "협상",
 ]
-INDUSTRY_KEYWORDS = ["정책", "규제", "보조금", "투자", "수소", "전기차", "반도체", "산업"]
+INDUSTRY_KEYWORDS = [
+    "전기차 캐즘", "캐즘", "하이브리드", "HEV", "LFP", "NCM", "배터리 화재",
+    "BaaS", "IONNA", "NACS", "Euro7", "유로7", "EPA", "플릿", "CAFE",
+    "탄소중립", "RE100", "LCA", "SDV", "E/E 아키텍처", "OTA", "자율주행",
+    "로보택시", "피지컬 AI", "SDF", "정책", "규제", "보조금", "투자",
+    "수소", "전기차", "반도체", "산업",
+]
 
 
 def categorize(title: str, desc: str) -> str:
@@ -130,6 +217,61 @@ def categorize(title: str, desc: str) -> str:
     if geo_score > industry_score:
         return "국제 정세"
     return "자동차 산업"
+
+
+# 규모 있는 언론사 우선순위용 — 기사 원문 도메인이 아래에 해당하면 순위 산정 시 보너스 점수
+# (완전히 걸러내는 건 아니고, 같은 카테고리 안에서 이런 매체 기사가 먼저 뽑히도록 가중치만 줌)
+MAJOR_OUTLET_DOMAINS = {
+    "yna.co.kr": "연합뉴스",
+    "sedaily.com": "서울경제",
+    "hankyung.com": "한국경제",
+    "chosun.com": "조선일보",
+    "joongang.co.kr": "중앙일보",
+    "joins.com": "중앙일보",
+    "donga.com": "동아일보",
+    "kbs.co.kr": "KBS",
+    "sbs.co.kr": "SBS",
+    "imbc.com": "MBC",
+    "mbc.co.kr": "MBC",
+    "mk.co.kr": "매일경제",
+    "hani.co.kr": "한겨레",
+    "yonhapnews.co.kr": "연합뉴스",
+}
+MAJOR_OUTLET_BONUS = 4
+
+
+def extract_domain(link: str) -> str:
+    try:
+        netloc = urlparse(link).netloc.lower()
+        return netloc[4:] if netloc.startswith("www.") else netloc
+    except Exception:
+        return ""
+
+
+def match_major_outlet(domain: str):
+    for base, name in MAJOR_OUTLET_DOMAINS.items():
+        if domain == base or domain.endswith("." + base):
+            return name
+    return None
+
+
+# 같은 이슈를 여러 매체가 비슷하게 받아쓴 "중복 기사"를 걸러내기 위한 제목 유사도 체크
+# (완전 일치가 아니라, [단독]/[속보] 같은 태그를 떼고 핵심 단어 구성이 얼마나 겹치는지로 판단)
+_TITLE_TAG_RE = re.compile(r"^\s*\[[^\]]{1,12}\]\s*")
+_TITLE_NOISE_RE = re.compile(r"[^\w가-힣]+")
+
+
+def _normalize_title(title: str) -> str:
+    t = _TITLE_TAG_RE.sub("", title or "")
+    t = _TITLE_NOISE_RE.sub(" ", t)
+    return t.strip()
+
+
+def is_similar_title(a: str, b: str, threshold: float = 0.6) -> bool:
+    na, nb = _normalize_title(a), _normalize_title(b)
+    if not na or not nb:
+        return False
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= threshold
 
 # 2026년 네이버 뉴스 검색 API가 NAVER API HUB(NCP)로 이관되면서
 # 요청 주소와 인증 헤더 이름이 변경되었습니다.
@@ -228,6 +370,9 @@ def collect_candidates(seen_links: set):
                 continue  # 자동차/통상/지정학 관련성이 너무 낮은 결과 제외
                           # (현대차를 직접 언급하지 않아도 여기서 걸러지지 않으면 후보에 포함됨)
 
+            domain = extract_domain(link)
+            outlet_name = match_major_outlet(domain)
+
             candidates[norm] = {
                 "title": title,
                 "link": link,
@@ -236,6 +381,8 @@ def collect_candidates(seen_links: set):
                 "score": score,
                 "matched_query": q,
                 "category": categorize(title, desc),
+                "source": outlet_name or domain,
+                "is_major_outlet": outlet_name is not None,
             }
     return list(candidates.values())
 
@@ -243,13 +390,19 @@ def collect_candidates(seen_links: set):
 def _sort_key(c):
     pub = parse_pubdate(c["pubDate"])
     ts = pub.timestamp() if pub else 0
-    return (c["score"], ts)
+    bonus = MAJOR_OUTLET_BONUS if c.get("is_major_outlet") else 0
+    return (c["score"] + bonus, ts)
 
 
 def rank_top_n_per_category(candidates, n=TOP_N_PER_CATEGORY):
     """카테고리(현대자동차/자동차 산업/국제 정세)별로 각각 상위 n개씩 선별.
     (기존에는 전체 통틀어 top 10만 뽑았는데, 카테고리마다 최소 n개를 채우기 위해
-    카테고리별로 별도 선별 후 합침)"""
+    카테고리별로 별도 선별 후 합침)
+
+    선별 과정에서:
+    - 규모 있는 언론사(연합뉴스/서울경제/한국경제/조선일보/중앙일보/동아일보/KBS/SBS/MBC 등)
+      기사가 점수 동점권에서 먼저 뽑히도록 _sort_key에 보너스가 반영되어 있음
+    - 이미 뽑힌 기사와 제목이 비슷한(같은 이슈를 여러 매체가 받아쓴) 기사는 건너뜀"""
     by_category = {cat: [] for cat in CATEGORIES}
     for c in candidates:
         by_category.setdefault(c["category"], []).append(c)
@@ -257,7 +410,14 @@ def rank_top_n_per_category(candidates, n=TOP_N_PER_CATEGORY):
     selected = []
     for cat in CATEGORIES:
         group = sorted(by_category.get(cat, []), key=_sort_key, reverse=True)
-        selected.extend(group[:n])
+        picked = []
+        for c in group:
+            if len(picked) >= n:
+                break
+            if any(is_similar_title(c["title"], p["title"]) for p in picked):
+                continue  # 이미 뽑힌 기사와 내용이 겹치는 것으로 판단 → 제외
+            picked.append(c)
+        selected.extend(picked)
 
     # 전체 목록은 관련도/최신순으로 다시 정렬 (카테고리 구분 없이 "전체" 탭에서 보기 좋게)
     selected.sort(key=_sort_key, reverse=True)
@@ -266,6 +426,47 @@ def rank_top_n_per_category(candidates, n=TOP_N_PER_CATEGORY):
 
 def matched_keywords(text: str):
     return [kw for kw in RELEVANCE_KEYWORDS if kw in text]
+
+
+# ANTHROPIC_API_KEY가 없을 때 쓰는 규칙 기반 인사이트 템플릿.
+# 매칭된 키워드의 "성격"에 따라 다른 문장을 골라 쓰기 때문에, 모든 기사에 똑같은
+# 문장이 반복되지 않고 최소한 주제별로는 다른 인사이트가 나오도록 함.
+# (진짜 기사별 맞춤 인사이트를 원하면 ANTHROPIC_API_KEY 등록이 필요 — 이건 그 대체용)
+INSIGHT_THEME_TEMPLATES = [
+    (
+        {"관세", "통상", "FTA", "대미투자", "무역"},
+        "관세·통상 조건은 발표 이후에도 세부 수치·적용 시점이 계속 바뀌므로, "
+        "이 기사의 조건이 이전 보도와 어떻게 달라졌는지 짚어두면 면접에서 "
+        "최신 동향을 정확히 설명할 수 있습니다.",
+    ),
+    (
+        {"지정학", "안보", "공급망", "희토류", "수출통제", "제재"},
+        "지정학 리스크가 구체적으로 어떤 경로(생산·수출·원자재 조달)로 사업에 "
+        "영향을 주는지 이 기사를 근거로 설명하면, 추상적인 답변을 피할 수 있습니다.",
+    ),
+    (
+        {"대관", "로비", "외교", "네트워크", "정상회의", "GPO", "성김", "성 김"},
+        "이 사례가 보여주는 실제 대외협력 활동 방식(어떤 채널·인물을 통해 움직였는지)을 "
+        "정리해두면, 지원 직무를 구체적으로 이해하고 있다는 인상을 줄 수 있습니다.",
+    ),
+    (
+        {"정책", "규제", "보조금", "수소", "전기차", "IRA", "탄소국경"},
+        "정책 방향 변화가 회사에 실제로 어떤 영향을 주는지 이 기사로 설명하면, "
+        "정책 모니터링이 왜 대외협력의 핵심 업무인지 답변에 근거를 더할 수 있습니다.",
+    ),
+]
+DEFAULT_INSIGHT = (
+    "이 사안이 향후 회사의 대외협력 대응(네트워크·정책 모니터링)에 주는 시사점을 "
+    "한 문장으로 정리해 면접 답변 소재로 활용해보세요."
+)
+
+
+def build_fallback_insight(kws: list) -> str:
+    kw_set = set(kws)
+    for theme_kws, template in INSIGHT_THEME_TEMPLATES:
+        if kw_set & theme_kws:
+            return template
+    return DEFAULT_INSIGHT
 
 
 def fallback_summary(item):
@@ -283,13 +484,9 @@ def fallback_summary(item):
             bolded_core = bolded_core.replace(kw, f"**{kw}**")
     core_md = f"- {bolded_core}"
 
-    kw_str = ", ".join(f"**{k}**" for k in kws[:3]) if kws else "**대외협력 전반**"
-    insight = (
-        f"- {kw_str} 관련 이슈입니다.\n"
-        f"- JD의 네트워크 관리/지정학 대응 항목과 연결해, 이 사안에서 어떤 이해관계자의 "
-        f"움직임을 어떻게 추적할지 자신의 경험(법안 모니터링, 국제법 쟁점 분석 등)과 "
-        f"엮어 답변을 준비해보세요."
-    )
+    # 매칭된 키워드의 주제(관세·통상 / 지정학 / 대관·외교 / 정책)에 맞는 인사이트를 골라서
+    # 이 기사에 실제로 등장한 내용에 조금 더 엮이도록 구성 (모든 기사에 똑같은 문장 X)
+    insight = f"- {build_fallback_insight(kws)}"
     return core_md, insight
 
 
@@ -495,6 +692,7 @@ def main():
             "matched_query": it["matched_query"],
             "score": it["score"],
             "category": it["category"],
+            "source": it.get("source", ""),
         })
 
     # 카테고리별(현대자동차/자동차 산업/국제 정세) + 전체 종합 요약 생성
