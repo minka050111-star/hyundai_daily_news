@@ -8,10 +8,12 @@
    - INDUSTRY_QUERIES: 현대차를 언급하지 않아도, 자동차 산업 전반의
      관세/통상/정책/지정학 이슈를 다루는 검색어 (현대차 전략에 영향 줄 수 있는 배경 뉴스)
 2. 이미 사용한 기사(seen_links.json)는 영구 제외
-3. 관련도 점수(MIN_SCORE 미만 제외, 현대차/기아 직접 언급 시 보너스 점수) +
-   최신순으로 상위 10개 선별 — "현대"라는 단어가 꼭 들어가야 하는 건 아님
-4. (ANTHROPIC_API_KEY가 있으면) Claude API로 핵심내용/면접 인사이트 생성
-   (없으면) 네이버가 제공하는 description을 핵심내용으로, 규칙 기반 인사이트로 대체
+3. 관련도 점수(MIN_SCORE 미만 제외, 현대차/기아 직접 언급 시 보너스 점수)로 필터링 후
+   "현대자동차" / "자동차 산업" / "국제 정세" 세 카테고리로 분류 (categorize 함수) —
+   "현대"라는 단어가 꼭 들어가야 하는 건 아님. 카테고리별로 각각 관련도·최신순 상위
+   TOP_N_PER_CATEGORY(기본 10)개씩 선별 (최대 하루 30건)
+4. (ANTHROPIC_API_KEY가 있으면) Claude API로 개별 기사 핵심내용/면접 인사이트 +
+   카테고리별 종합 요약 생성 (없으면) 규칙 기반으로 자동 대체
 5. docs/data/{YYYY-MM-DD}.json 으로 저장, docs/data/index.json / seen_links.json 갱신
 
 필요 환경변수:
@@ -47,9 +49,10 @@ CONTEXT_PATH = Path(__file__).resolve().parent / "context.txt"
 SEEN_LINKS_PATH = DATA_DIR / "seen_links.json"
 INDEX_PATH = DATA_DIR / "index.json"
 
-TOP_N = 10
+TOP_N_PER_CATEGORY = 10  # 카테고리(현대자동차/자동차 산업/국제 정세)별로 뽑을 기사 수
 FRESH_DAYS = 5          # 이 기간(일) 이내 기사만 신선한 것으로 취급
-MAX_PER_QUERY = 30       # 쿼리당 네이버 API에서 가져올 개수
+MAX_PER_QUERY = 50       # 쿼리당 네이버 API에서 가져올 개수 (카테고리별로 10개씩 채우려면
+                          # 후보 풀이 더 넉넉해야 하므로 기존 30 → 50으로 확대)
 MIN_SCORE = 3            # 이 점수 미만이면 "현대차 관련성 낮음"으로 보고 제외
                           # (예전엔 제목/설명에 "현대"가 꼭 들어가야 했지만,
                           #  이제는 "현대"가 없어도 자동차 산업/통상/지정학 전반에서
@@ -104,6 +107,29 @@ RELEVANCE_KEYWORDS = {
 # 현대차/기아를 직접 언급하면 주는 보너스 점수 (필수는 아니지만 우선순위를 높여줌)
 DIRECT_MENTION_KEYWORDS = ["현대차", "현대자동차", "현대차그룹", "기아"]
 DIRECT_MENTION_BONUS = 2
+
+# 대시보드 카테고리 분류용 키워드
+# 1) 제목/설명에 현대차/기아가 직접 언급되면 무조건 "현대자동차"
+# 2) 그렇지 않으면 관세/통상/외교/안보 등 "국제 정세" 성격 키워드와
+#    정책/보조금/기술 등 "자동차 산업" 성격 키워드의 매칭 개수를 비교해 분류
+CATEGORIES = ["현대자동차", "자동차 산업", "국제 정세"]
+GEO_KEYWORDS = [
+    "관세", "통상", "협상", "대미투자", "무역", "FTA", "지정학", "안보",
+    "희토류", "공급망", "로비", "대관", "외교", "정상회의", "네트워크",
+    "IRA", "성김", "성 김", "GPO", "탄소국경", "수출통제", "제재",
+]
+INDUSTRY_KEYWORDS = ["정책", "규제", "보조금", "투자", "수소", "전기차", "반도체", "산업"]
+
+
+def categorize(title: str, desc: str) -> str:
+    text = f"{title} {desc}"
+    if any(kw in text for kw in DIRECT_MENTION_KEYWORDS):
+        return "현대자동차"
+    geo_score = sum(1 for kw in GEO_KEYWORDS if kw in text)
+    industry_score = sum(1 for kw in INDUSTRY_KEYWORDS if kw in text)
+    if geo_score > industry_score:
+        return "국제 정세"
+    return "자동차 산업"
 
 # 2026년 네이버 뉴스 검색 API가 NAVER API HUB(NCP)로 이관되면서
 # 요청 주소와 인증 헤더 이름이 변경되었습니다.
@@ -209,18 +235,33 @@ def collect_candidates(seen_links: set):
                 "pubDate": it.get("pubDate", ""),
                 "score": score,
                 "matched_query": q,
+                "category": categorize(title, desc),
             }
     return list(candidates.values())
 
 
-def rank_top_n(candidates, n=TOP_N):
-    def sort_key(c):
-        pub = parse_pubdate(c["pubDate"])
-        ts = pub.timestamp() if pub else 0
-        return (c["score"], ts)
+def _sort_key(c):
+    pub = parse_pubdate(c["pubDate"])
+    ts = pub.timestamp() if pub else 0
+    return (c["score"], ts)
 
-    candidates.sort(key=sort_key, reverse=True)
-    return candidates[:n]
+
+def rank_top_n_per_category(candidates, n=TOP_N_PER_CATEGORY):
+    """카테고리(현대자동차/자동차 산업/국제 정세)별로 각각 상위 n개씩 선별.
+    (기존에는 전체 통틀어 top 10만 뽑았는데, 카테고리마다 최소 n개를 채우기 위해
+    카테고리별로 별도 선별 후 합침)"""
+    by_category = {cat: [] for cat in CATEGORIES}
+    for c in candidates:
+        by_category.setdefault(c["category"], []).append(c)
+
+    selected = []
+    for cat in CATEGORIES:
+        group = sorted(by_category.get(cat, []), key=_sort_key, reverse=True)
+        selected.extend(group[:n])
+
+    # 전체 목록은 관련도/최신순으로 다시 정렬 (카테고리 구분 없이 "전체" 탭에서 보기 좋게)
+    selected.sort(key=_sort_key, reverse=True)
+    return selected
 
 
 def matched_keywords(text: str):
@@ -241,6 +282,91 @@ def fallback_summary(item):
         f"국제법 쟁점 분석 등)과 엮어 답변을 준비해보세요."
     )
     return core, insight
+
+
+def fallback_category_summary(category: str, items: list, overall: bool = False) -> str:
+    """ANTHROPIC_API_KEY가 없을 때: 카테고리별(또는 전체) 규칙 기반 종합 요약"""
+    if not items:
+        return f"오늘 '{category}' 카테고리에 해당하는 기사가 없습니다."
+
+    kw_counts = {}
+    for it in items:
+        for kw in matched_keywords(f"{it['title']} {it['core']}"):
+            kw_counts[kw] = kw_counts.get(kw, 0) + 1
+    top_kws = sorted(kw_counts, key=lambda k: -kw_counts[k])[:4]
+    kw_str = ", ".join(top_kws) if top_kws else "대외협력 전반"
+    latest_title = items[0]["title"]
+
+    if overall:
+        cat_counts = {}
+        for it in items:
+            cat_counts[it["category"]] = cat_counts.get(it["category"], 0) + 1
+        breakdown = ", ".join(f"{c} {n}건" for c, n in cat_counts.items())
+        return (
+            f"오늘은 총 {len(items)}건의 기사가 수집되었습니다 ({breakdown}). "
+            f"주요 키워드는 {kw_str}이며, 가장 최근 기사는 '{latest_title}'입니다."
+        )
+    return (
+        f"오늘 '{category}' 카테고리에는 총 {len(items)}건의 기사가 수집되었습니다. "
+        f"주요 키워드는 {kw_str}이며, 가장 최근 기사는 '{latest_title}'입니다."
+    )
+
+
+def summarize_categories_with_claude(items_by_category: dict, context_text: str):
+    """ANTHROPIC_API_KEY가 있을 때: 카테고리별 종합 요약을 Claude API로 한 번에 생성
+    (개별 기사 요약이 아니라, 그 카테고리에 모인 기사들을 묶어서 보는 종합 시각)"""
+    try:
+        import anthropic
+    except ImportError:
+        print("WARN: anthropic 패키지가 없어 규칙 기반 카테고리 요약으로 대체합니다.", file=sys.stderr)
+        return None
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    blocks = []
+    for cat, items in items_by_category.items():
+        if not items:
+            continue
+        lines = "\n".join(f"- {it['title']}: {it['core']}" for it in items)
+        blocks.append(f"[{cat}] ({len(items)}건)\n{lines}")
+    articles_block = "\n\n".join(blocks)
+
+    if not articles_block:
+        return None
+
+    prompt = f"""다음은 채용 지원 직무 JD와 지원자 자소서 컨텍스트입니다:
+
+{context_text}
+
+---
+
+아래는 오늘 수집된 기사들을 카테고리별로 정리한 목록입니다.
+
+{articles_block}
+
+---
+
+각 카테고리별로, 오늘 그 카테고리에 모인 기사들을 종합했을 때 어떤 흐름/맥락으로 읽히는지
+3~4문장으로 요약해주세요 (개별 기사를 하나씩 재서술하지 말고, "오늘 이 카테고리 전체를 보면
+~한 흐름이다"는 종합적 시각으로). 가능하면 위 JD/자소서 맥락과 연결되는 시사점도 한 문장 포함하세요.
+
+반드시 아래 JSON 객체 형식으로만 답하세요. 카테고리 이름은 위 목록의 대괄호 안 이름과
+정확히 동일하게 쓰고, 목록에 없는 카테고리는 포함하지 마세요. 다른 설명은 절대 붙이지 마세요:
+{{"현대자동차": "요약...", "자동차 산업": "요약...", "국제 정세": "요약..."}}
+"""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = msg.content[0].text.strip()
+    text = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+    try:
+        return json.loads(text)
+    except Exception as e:
+        print(f"WARN: 카테고리 요약 파싱 실패, 규칙 기반으로 대체: {e}", file=sys.stderr)
+        return None
 
 
 def summarize_with_claude(items, context_text):
@@ -309,7 +435,7 @@ def main():
     seen_links = set(seen_links_list)
 
     candidates = collect_candidates(seen_links)
-    top_items = rank_top_n(candidates, TOP_N)
+    top_items = rank_top_n_per_category(candidates, TOP_N_PER_CATEGORY)
 
     if not top_items:
         print("오늘 수집된 신규 관련 기사가 없습니다. 종료합니다.")
@@ -335,11 +461,29 @@ def main():
             "insight": insight,
             "matched_query": it["matched_query"],
             "score": it["score"],
+            "category": it["category"],
         })
+
+    # 카테고리별(현대자동차/자동차 산업/국제 정세) + 전체 종합 요약 생성
+    items_by_category = {cat: [it for it in final if it["category"] == cat] for cat in CATEGORIES}
+
+    category_summaries = None
+    if ANTHROPIC_API_KEY:
+        category_summaries = summarize_categories_with_claude(items_by_category, context_text)
+    if not category_summaries:
+        category_summaries = {}
+    for cat in CATEGORIES:
+        if not category_summaries.get(cat):
+            category_summaries[cat] = fallback_category_summary(cat, items_by_category[cat])
+    category_summaries["전체"] = fallback_category_summary("전체", final, overall=True)
 
     today_str = kst_today().isoformat()
     out_path = DATA_DIR / f"{today_str}.json"
-    save_json(out_path, {"date": today_str, "items": final})
+    save_json(out_path, {
+        "date": today_str,
+        "items": final,
+        "category_summaries": category_summaries,
+    })
     print(f"저장 완료: {out_path} ({len(final)}건)")
 
     # seen_links 갱신 (영구 제외)
