@@ -592,8 +592,16 @@ def summarize_categories_with_claude(items_by_category: dict, context_text: str)
         return None
 
 
+# 한 번에 요청할 기사 개수. 기사 수가 많아지면(예: 카테고리별 10개씩 총 30개)
+# 응답 JSON이 max_tokens 안에 다 안 들어가서 문자열이 중간에 잘리는 문제가
+# 있었음 ("Unterminated string" 파싱 에러) → 배치로 나눠서 요청하도록 수정.
+SUMMARY_BATCH_SIZE = 8
+
+
 def summarize_with_claude(items, context_text):
-    """ANTHROPIC_API_KEY가 있을 때: Claude API로 핵심내용/인사이트 일괄 생성"""
+    """ANTHROPIC_API_KEY가 있을 때: Claude API로 핵심내용/인사이트 생성.
+    SUMMARY_BATCH_SIZE개씩 나눠서 요청하며, 한 배치가 실패해도 그 배치만
+    규칙 기반으로 대체되고 나머지 배치는 정상적으로 Claude 요약을 씁니다."""
     try:
         import anthropic
     except ImportError:
@@ -602,6 +610,14 @@ def summarize_with_claude(items, context_text):
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    results = []
+    for start in range(0, len(items), SUMMARY_BATCH_SIZE):
+        batch = items[start:start + SUMMARY_BATCH_SIZE]
+        results.extend(_summarize_batch_with_claude(client, batch, context_text))
+    return results
+
+
+def _summarize_batch_with_claude(client, items, context_text):
     articles_block = "\n\n".join(
         f"[{i+1}] 제목: {it['title']}\n설명: {it['description']}"
         for i, it in enumerate(items)
@@ -646,18 +662,18 @@ def summarize_with_claude(items, context_text):
     try:
         parsed = json.loads(text)
     except Exception as e:
-        print(f"WARN: Claude 응답 파싱 실패, 규칙 기반으로 대체: {e}", file=sys.stderr)
-        return None
+        print(f"WARN: Claude 응답 파싱 실패(배치 {len(items)}건), 이 배치만 규칙 기반으로 대체: {e}", file=sys.stderr)
+        parsed = None
 
-    by_index = {p["index"]: p for p in parsed if "index" in p}
-    results = []
+    by_index = {p["index"]: p for p in (parsed or []) if "index" in p}
+    out = []
     for i, it in enumerate(items):
         p = by_index.get(i + 1)
         if p:
-            results.append((p.get("core", ""), p.get("insight", "")))
+            out.append((p.get("core", ""), p.get("insight", "")))
         else:
-            results.append(fallback_summary(it))
-    return results
+            out.append(fallback_summary(it))
+    return out
 
 
 def main():
