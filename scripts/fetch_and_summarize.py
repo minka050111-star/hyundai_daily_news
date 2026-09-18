@@ -269,47 +269,67 @@ def matched_keywords(text: str):
 
 
 def fallback_summary(item):
-    """ANTHROPIC_API_KEY가 없을 때: 규칙 기반으로 핵심내용/인사이트 생성"""
+    """ANTHROPIC_API_KEY가 없을 때: 규칙 기반으로 핵심내용/인사이트 생성
+    (대시보드에서 불릿+볼드로 렌더링되도록 마크다운 형식(-, **) 사용)"""
     core = item["description"] or item["title"]
     if len(core) > 140:
         core = core[:140].rstrip() + "..."
 
     kws = matched_keywords(f"{item['title']} {item['description']}")
-    kw_str = ", ".join(kws[:3]) if kws else "대외협력 전반"
+    # 본문에 등장하는 핵심 키워드를 볼드 처리
+    bolded_core = core
+    for kw in kws[:3]:
+        if kw in bolded_core:
+            bolded_core = bolded_core.replace(kw, f"**{kw}**")
+    core_md = f"- {bolded_core}"
+
+    kw_str = ", ".join(f"**{k}**" for k in kws[:3]) if kws else "**대외협력 전반**"
     insight = (
-        f"'{kw_str}' 관련 이슈입니다. JD의 네트워크 관리/지정학 대응 항목과 연결해, "
-        f"이 사안에서 어떤 이해관계자의 움직임을 어떻게 추적할지 자신의 경험(법안 모니터링, "
-        f"국제법 쟁점 분석 등)과 엮어 답변을 준비해보세요."
+        f"- {kw_str} 관련 이슈입니다.\n"
+        f"- JD의 네트워크 관리/지정학 대응 항목과 연결해, 이 사안에서 어떤 이해관계자의 "
+        f"움직임을 어떻게 추적할지 자신의 경험(법안 모니터링, 국제법 쟁점 분석 등)과 "
+        f"엮어 답변을 준비해보세요."
     )
-    return core, insight
+    return core_md, insight
 
 
 def fallback_category_summary(category: str, items: list, overall: bool = False) -> str:
-    """ANTHROPIC_API_KEY가 없을 때: 카테고리별(또는 전체) 규칙 기반 종합 요약"""
+    """ANTHROPIC_API_KEY가 없을 때: 카테고리별(또는 전체) 규칙 기반 종합 요약
+    (LLM 없이도 최대한 "총괄 요약"에 가깝게 — 키워드 빈도 + 대표 기사 제목 몇 개를
+    불릿+볼드 마크다운 형식으로 구성. 대시보드가 이 형식을 파싱해서 불릿 리스트로
+    보여줍니다. 진짜 자연어 종합은 ANTHROPIC_API_KEY를 등록해야 Claude가 생성하며,
+    이건 그게 없을 때의 대체용입니다.)"""
     if not items:
-        return f"오늘 '{category}' 카테고리에 해당하는 기사가 없습니다."
+        return f"- 오늘 '{category}' 카테고리에 해당하는 기사가 없습니다."
 
     kw_counts = {}
     for it in items:
         for kw in matched_keywords(f"{it['title']} {it['core']}"):
             kw_counts[kw] = kw_counts.get(kw, 0) + 1
-    top_kws = sorted(kw_counts, key=lambda k: -kw_counts[k])[:4]
-    kw_str = ", ".join(top_kws) if top_kws else "대외협력 전반"
-    latest_title = items[0]["title"]
+    top_kws = sorted(kw_counts, key=lambda k: -kw_counts[k])[:5]
+    kw_str = ", ".join(f"**{k}**" for k in top_kws) if top_kws else "**대외협력 전반**"
 
+    # 대표 기사 제목 (최신순 상위 3개) — "몇 건 수집됨" 수준이 아니라
+    # 실제 헤드라인을 불릿으로 보여줘서 무슨 내용인지 바로 감이 오도록 구성
+    headline_titles = [it["title"] for it in items[:3]]
+
+    lines = []
     if overall:
         cat_counts = {}
         for it in items:
             cat_counts[it["category"]] = cat_counts.get(it["category"], 0) + 1
-        breakdown = ", ".join(f"{c} {n}건" for c, n in cat_counts.items())
-        return (
-            f"오늘은 총 {len(items)}건의 기사가 수집되었습니다 ({breakdown}). "
-            f"주요 키워드는 {kw_str}이며, 가장 최근 기사는 '{latest_title}'입니다."
-        )
-    return (
-        f"오늘 '{category}' 카테고리에는 총 {len(items)}건의 기사가 수집되었습니다. "
-        f"주요 키워드는 {kw_str}이며, 가장 최근 기사는 '{latest_title}'입니다."
+        breakdown = ", ".join(f"**{c}** {n}건" for c, n in cat_counts.items())
+        lines.append(f"오늘은 총 **{len(items)}건**의 기사가 수집되었습니다 ({breakdown})")
+    else:
+        lines.append(f"오늘 '{category}' 카테고리에는 총 **{len(items)}건**의 기사가 수집되었습니다")
+    lines.append(f"주요 키워드: {kw_str}")
+    for t in headline_titles:
+        lines.append(f"대표 기사: **{t}**")
+    lines.append(
+        "더 자연스러운 종합 요약을 원하시면 ANTHROPIC_API_KEY를 GitHub Secrets에 "
+        "등록하시면 Claude가 직접 요약을 작성해드려요."
     )
+    return "\n".join(f"- {l}" for l in lines)
 
 
 def summarize_categories_with_claude(items_by_category: dict, context_text: str):
@@ -347,12 +367,18 @@ def summarize_categories_with_claude(items_by_category: dict, context_text: str)
 ---
 
 각 카테고리별로, 오늘 그 카테고리에 모인 기사들을 종합했을 때 어떤 흐름/맥락으로 읽히는지
-3~4문장으로 요약해주세요 (개별 기사를 하나씩 재서술하지 말고, "오늘 이 카테고리 전체를 보면
-~한 흐름이다"는 종합적 시각으로). 가능하면 위 JD/자소서 맥락과 연결되는 시사점도 한 문장 포함하세요.
+요약해주세요 (개별 기사를 하나씩 재서술하지 말고, "오늘 이 카테고리 전체를 보면 ~한 흐름이다"는
+종합적 시각으로). 가능하면 위 JD/자소서 맥락과 연결되는 시사점도 포함하세요.
 
-반드시 아래 JSON 객체 형식으로만 답하세요. 카테고리 이름은 위 목록의 대괄호 안 이름과
-정확히 동일하게 쓰고, 목록에 없는 카테고리는 포함하지 마세요. 다른 설명은 절대 붙이지 마세요:
-{{"현대자동차": "요약...", "자동차 산업": "요약...", "국제 정세": "요약..."}}
+형식 지침 (한눈에 읽히도록 마크다운으로 작성):
+- 한 카테고리당 2~4개의 불릿포인트로 작성하세요. 각 불릿은 새 줄에 "- "로 시작합니다.
+- 각 불릿에서 가장 핵심적인 키워드나 문장은 **이렇게 볼드**로 표시하세요.
+- 불릿 안 문장은 1문장 이내로 간결하게 쓰세요.
+
+반드시 아래 JSON 객체 형식으로만 답하세요 (각 값은 "- ...\\n- ..." 형태의 멀티라인 문자열).
+카테고리 이름은 위 목록의 대괄호 안 이름과 정확히 동일하게 쓰고, 목록에 없는 카테고리는
+포함하지 마세요. 다른 설명은 절대 붙이지 마세요:
+{{"현대자동차": "- 첫 번째 불릿\\n- 두 번째 불릿", "자동차 산업": "- ...", "국제 정세": "- ..."}}
 """
 
     msg = client.messages.create(
@@ -391,16 +417,23 @@ def summarize_with_claude(items, context_text):
 ---
 
 아래는 오늘 수집된 후보 기사 {len(items)}개입니다. 각 기사에 대해 위 컨텍스트를 참고하여
-"핵심내용"(1~2문장, 기사의 사실관계 요약)과 "면접 인사이트"(1~2문장, 이 기사를 면접에서
-어떻게 활용할 수 있는지 JD/자소서와 연결)를 작성해주세요.
+"핵심내용"(기사의 사실관계 요약)과 "면접 인사이트"(이 기사를 면접에서 어떻게 활용할 수
+있는지 JD/자소서와 연결)를 작성해주세요.
+
+형식 지침 (한눈에 읽히도록 마크다운으로 작성):
+- 핵심내용과 면접 인사이트 각각 1~2개의 불릿포인트로 작성하세요. 각 불릿은 새 줄에
+  "- "로 시작합니다 (여러 개면 "\\n"으로 구분).
+- 각 불릿에서 가장 핵심적인 키워드나 문장은 **이렇게 볼드**로 표시하세요.
+- 불릿 하나는 1문장 이내로 간결하게 쓰세요.
 
 {articles_block}
 
 ---
 
-반드시 아래 JSON 배열 형식으로만 답하세요. 다른 설명은 절대 붙이지 마세요:
+반드시 아래 JSON 배열 형식으로만 답하세요 (core, insight 값은 "- ...\\n- ..." 형태의
+멀티라인 문자열). 다른 설명은 절대 붙이지 마세요:
 [
-  {{"index": 1, "core": "핵심내용", "insight": "면접 인사이트"}},
+  {{"index": 1, "core": "- 핵심 불릿1\\n- 핵심 불릿2", "insight": "- 인사이트 불릿1"}},
   ...
 ]
 """
